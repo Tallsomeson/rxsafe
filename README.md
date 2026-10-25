@@ -171,15 +171,6 @@ Additional implementation limits include historical-row counting, approximate ag
 
 RxSafe uses deterministic rules rather than a machine-learning model. The scoring logic is inspectable, but transparency is not evidence of clinical validity. The application surfaces limitations where results are viewed. The bundled sample is synthetic, while uploaded data requires separate provenance and permission checks. Any real-world clinical use requires validation and appropriate governance.
 
-## Team
-
-| Name | Role |
-|---|---|
-| [Team Member 1] | [Role] |
-| [Team Member 2] | [Role] |
-
-Add all team members to the Devpost submission and confirm the event's participation requirements.
-
 ## Licence
 
 Application code: MIT Licence. A corresponding `LICENSE` file should accompany this declaration.
