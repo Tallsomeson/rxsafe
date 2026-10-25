@@ -2,10 +2,12 @@
 import streamlit as st
 import plotly.express as px
 import pandas as pd
+from io import BytesIO
+import hashlib
 from data_loader import load_synthea_patients, get_openprescribing_data
 from risk_scorer import apply_risk_scores
 
-# ─── PAGE CONFIG ─────────────────────────────────────────────────────────────
+# ─── PAGE CONFIG ────────────────────────────────────
 st.set_page_config(
     page_title="RxSafe — Polypharmacy Risk Intelligence",
     page_icon="💊",
@@ -13,13 +15,42 @@ st.set_page_config(
     initial_sidebar_state="collapsed"
 )
 
-# ─── CUSTOM CSS ──────────────────────────────────────────────────────────────
+# ─── CUSTOM CSS ────────────────────────────────────
 st.markdown("""
 <style>
     .stApp {
-        background:
-            radial-gradient(circle at top left, rgba(37, 99, 235, 0.08), transparent 26%),
-            linear-gradient(180deg, #f8fbff 0%, #eef4fa 100%);
+        background: linear-gradient(180deg, #f8fbff 0%, #eef4fa 100%);
+        color: #0B1222;
+    }
+
+    h1 { color: #0B1222; }
+    .rx-summary-header {
+        display: grid;
+        grid-template-columns: 240px minmax(0, 1fr);
+        gap: 20px;
+        align-items: center;
+        margin-bottom: 18px;
+    }
+    .rx-summary-header .rx-summary-banner { margin: 0; }
+    .rx-summary-header .rx-section-title { font-size: 1.3rem; }
+    .rx-panel { color: #0B1222; }
+    [data-testid="stExpander"] { background: #ffffff; color: #0B1222; }
+    .rx-metric-card { min-width: 0; }
+    @media (min-width: 701px) and (max-width: 1100px) {
+        .rx-metric-grid { grid-template-columns: repeat(2, minmax(0, 1fr)) !important; }
+    }
+    @media (max-width: 700px) {
+        .rx-summary-header { grid-template-columns: 1fr; }
+    }
+
+    @keyframes pulse {
+        0%, 100% { opacity: 1; }
+        50% { opacity: 0.4; }
+    }
+
+    [data-testid="stExpander"] {
+        border: 1px solid rgba(148, 163, 184, 0.22);
+        border-radius: 16px;
     }
 
     .main .block-container {
@@ -135,7 +166,8 @@ st.markdown("""
         display: inline-block;
     }
 
-    .rx-panel {
+    .rx-panel,
+    .data-provenance-banner {
         background: rgba(255, 255, 255, 0.78);
         border: 1px solid rgba(148, 163, 184, 0.22);
         border-radius: 20px;
@@ -228,7 +260,8 @@ st.markdown("""
         gap: 12px;
     }
 
-    .rx-metric-card {
+    .rx-metric-card,
+    [data-testid="metric-container"] {
         border-radius: 16px;
         padding: 18px 16px;
         border: 1px solid rgba(148, 163, 184, 0.16);
@@ -441,7 +474,8 @@ st.markdown("""
         margin: 0;
     }
 
-    .rx-footer {
+    .rx-footer,
+    .rxsafe-footer {
         display: flex;
         align-items: center;
         justify-content: space-between;
@@ -453,7 +487,9 @@ st.markdown("""
     }
 
     .rx-footer strong,
-    .rx-footer a {
+    .rx-footer a,
+    .rxsafe-footer strong,
+    .rxsafe-footer a {
         color: #1d4ed8;
         font-weight: 700;
         text-decoration: none;
@@ -569,16 +605,39 @@ def section_heading_html(icon, title, caption):
     """
 
 
+st.subheader("Dataset workspace")
+dataset_mode = st.radio("Choose a dataset", ["Bundled Synthea sample", "Upload CSV pair"], horizontal=True)
+st.caption("Use synthetic or de-identified test data. CSVs are processed by this app; they are not sent to OpenPrescribing.")
+if dataset_mode == "Upload CSV pair":
+    st.caption("Patients: Id, BIRTHDATE (YYYY-MM-DD); optional FIRST, LAST. Medications: PATIENT, DESCRIPTION. PATIENT must match Id.")
+    patient_upload = st.file_uploader("Patient CSV", type=['csv'], key="patients_upload")
+    medication_upload = st.file_uploader("Medication CSV", type=['csv'], key="medications_upload")
+    if patient_upload is None or medication_upload is None:
+        st.info("Upload both CSV files to calculate results. The sample is not used as a fallback.")
+        st.stop()
+    patient_bytes, medication_bytes = patient_upload.getvalue(), medication_upload.getvalue()
+else:
+    patient_bytes = medication_bytes = None
+
 try:
-    patients, medications = load_data()
-except FileNotFoundError:
-    st.error("""
-    **Data files not found.**
-    Please ensure `data/patients.csv` and `data/medications.csv`
-    exist in the project folder.
-    Download from: synthea.mitre.org/downloads -> '1K Sample CSV'
-    """)
+    if dataset_mode == "Upload CSV pair":
+        patients, medications = load_synthea_patients(BytesIO(patient_bytes), BytesIO(medication_bytes))
+        patients = apply_risk_scores(patients, medications)
+    else:
+        patients, medications = load_data()
+except (FileNotFoundError, ValueError, pd.errors.ParserError, UnicodeDecodeError) as exc:
+    st.error(f"Dataset could not be loaded: {exc}")
     st.stop()
+if patients.empty:
+    st.info("This dataset has no eligible patients aged 65 or older. Upload a different dataset.")
+    st.stop()
+st.info(f"Active dataset: {dataset_mode}. {len(patients):,} patients aged 65+; {len(medications):,} medication records.")
+st.caption("Medication counts include all rows in the supplied history, not distinct concurrent drugs. Scores are an unvalidated demonstration formula.")
+if patient_bytes is not None:
+    with st.expander("Verify uploaded file fingerprints"):
+        st.text("Patients SHA-256: " + hashlib.sha256(patient_bytes).hexdigest())
+        st.text("Medications SHA-256: " + hashlib.sha256(medication_bytes).hexdigest())
+st.download_button("Download calculated results", patients[['Id', 'age', 'med_count', 'risk_score', 'risk_tier', 'flagged_drugs']].to_csv(index=False).encode('utf-8'), file_name="rxsafe_results.csv", mime="text/csv")
 
 total = len(patients)
 high_risk = patients[patients["risk_tier"] == "🔴 High Risk"].copy()
@@ -615,9 +674,9 @@ header_html = """
                 Data provenance
             </div>
             <p class="rx-provenance-copy">
-                Synthea<sup>TM</sup> synthetic patients - MITRE Corporation (Apache 2.0)
+                Synthea™ synthetic patients - MITRE Corporation (Apache 2.0)
                 <br>
-                OpenPrescribing API - Bennett Institute, University of Oxford
+                OpenPrescribing API - Bennett Institute, University of Oxford (Open Government Licence v3.0)
                 <br>
                 <strong>Zero real patient data is used in this application.</strong>
             </p>
@@ -625,33 +684,38 @@ header_html = """
     </div>
 </div>
 """
+if dataset_mode == "Upload CSV pair":
+    header_html = header_html.replace("Synthetic Data Only", "Uploaded Test Data").replace("Zero real patient data is used in this application.", "Patient results calculated from your uploaded CSV pair.")
 st.markdown(header_html, unsafe_allow_html=True)
 
 summary_html = f"""
 <div class="rx-panel">
+    <div class="rx-summary-header">
     <div class="rx-section-title">
         <span class="rx-section-icon">#</span>
         <span>Executive Summary</span>
     </div>
     <div class="rx-summary-banner">
-        Analysis of <strong>{total:,}</strong> synthetic elderly patients shows a significant prevalence
+        Analysis of <strong>{total:,}</strong> eligible patients shows a significant prevalence
         of polypharmacy, with <strong>{poly_pct:.1f}%</strong> of patients on five or more medications
         and <strong>{high_risk_pct:.1f}%</strong> classified as high risk.
     </div>
+    </div>
     <div class="rx-metric-grid">
-        {metric_card_html("👥", "Patients Analysed", f"{total:,}", "Synthetic cohort size", "rx-metric-blue", "Cohort 65+")}
+        {metric_card_html("👥", "Patients Analysed", f"{total:,}", "Active cohort size", "rx-metric-blue", "Cohort 65+")}
         {metric_card_html("⚠️", "High Risk Patients", f"{high_risk_count:,}", "Scoring 70-100", "rx-metric-red", f"{high_risk_pct:.1f}% of cohort")}
-        {metric_card_html("💊", "Polypharmacy (5+)", f"{polypharmacy_count:,}", "Medication burden", "rx-metric-orange", f"{poly_pct:.1f}% of cohort")}
+        {metric_card_html("💊", "Polypharmacy (5+)", f"{polypharmacy_count:,}", "Medication burden", "rx-metric-red", f"{poly_pct:.1f}% of cohort")}
         {metric_card_html("➕", "Avg Medications", f"{avg_meds:.1f}", "Per patient", "rx-metric-cyan", "Mean count")}
     </div>
 </div>
 """
+summary_html = "".join(line.strip() for line in summary_html.splitlines())
 st.markdown(summary_html, unsafe_allow_html=True)
 
 st.markdown(section_heading_html(
     "↗",
     "Risk Landscape",
-    "Each bubble represents one synthetic patient. Position = age x medications. Size = risk score. Colour = risk tier."
+    "Each bubble represents one patient record. Position = age x medications. Size = risk score. Colour = risk tier."
 ), unsafe_allow_html=True)
 
 legend_html = """
@@ -661,7 +725,7 @@ legend_html = """
         <span>High Risk (70-100)</span>
     </div>
     <div class="rx-legend-item">
-        <span class="rx-legend-dot" style="background:#f59e0b;"></span>
+        <span class="rx-legend-dot" style="background:#ff9800;"></span>
         <span>Moderate Risk (40-69)</span>
     </div>
     <div class="rx-legend-item">
@@ -685,7 +749,7 @@ fig = px.scatter(
     color="risk_tier",
     color_discrete_map={
         "🔴 High Risk": "#ef5350",
-        "🟡 Moderate Risk": "#f59e0b",
+        "🟡 Moderate Risk": "#ff9800",
         "🟢 Low Risk": "#66bb6a"
     },
     hover_name="display_name",
@@ -710,10 +774,10 @@ fig.update_traces(
     marker=dict(line=dict(width=0.5, color="rgba(255,255,255,0.55)"))
 )
 fig.update_layout(
-    height=430,
+    height=500,
     showlegend=False,
-    plot_bgcolor="#ffffff",
-    paper_bgcolor="rgba(255,255,255,0)",
+    plot_bgcolor="rgba(0,0,0,0)",
+    paper_bgcolor="rgba(0,0,0,0)",
     margin=dict(t=12, r=18, b=52, l=52),
     xaxis=dict(
         title=dict(text="Patient Age (years)", font=dict(color="#556987", size=12)),
@@ -735,18 +799,18 @@ fig.update_layout(
     )
 )
 fig.add_annotation(
-    x=patients["age"].max() - 1,
-    y=patients["med_count"].max() * 0.95,
-    text="Higher risk<br>with complex regimens",
-    showarrow=True,
-    arrowcolor="#ef4444",
-    ax=55,
-    ay=-20,
-    font=dict(color="#ef4444", size=10, family="Inter"),
-    bgcolor="rgba(254,242,242,0.96)",
-    bordercolor="rgba(239,68,68,0.18)",
-    borderwidth=1,
-    borderpad=6
+    x=0.98, y=0.98, xref="paper", yref="paper",
+    xanchor="right", yanchor="top",
+    text="⚠️ High-Risk Zone", showarrow=False,
+    font=dict(color="#fca5a5", size=12, family="Inter"),
+    bgcolor="rgba(11,18,34,0.85)", borderpad=6
+)
+fig.add_annotation(
+    x=0.02, y=0.02, xref="paper", yref="paper",
+    xanchor="left", yanchor="bottom",
+    text="Low complexity", showarrow=False,
+    font=dict(color="#6ee7b7", size=12, family="Inter"),
+    bgcolor="rgba(11,18,34,0.85)", borderpad=6
 )
 st.plotly_chart(fig, use_container_width=True)
 
@@ -757,7 +821,7 @@ with table_col:
     st.markdown(section_heading_html(
         "👥",
         "Patients Recommended for Medication Review",
-        "Top 10 highest risk synthetic patients. All are generated by Synthea - no real patient is represented."
+        "Top 10 highest scoring records in the active dataset."
     ), unsafe_allow_html=True)
 
     if top_review.empty:
@@ -819,7 +883,7 @@ with score_col:
         </div>
         <div class="rx-tier-list">
             <div class="rx-tier-item"><span class="rx-legend-dot" style="background:#ef5350;"></span> High Risk: 70-100</div>
-            <div class="rx-tier-item"><span class="rx-legend-dot" style="background:#f59e0b;"></span> Moderate Risk: 40-69</div>
+            <div class="rx-tier-item"><span class="rx-legend-dot" style="background:#ff9800;"></span> Moderate Risk: 40-69</div>
             <div class="rx-tier-item"><span class="rx-legend-dot" style="background:#66bb6a;"></span> Low Risk: 0-39</div>
         </div>
     </div>
@@ -831,36 +895,31 @@ st.markdown(section_heading_html(
     "We place limitations inside the interface itself so that caveats are visible at the point of use."
 ), unsafe_allow_html=True)
 
-limitations_html = f"""
-<div class="rx-limitations-grid">
-    {limitation_tile_html(
-        "🌍",
-        "1. Demographic bias in source data",
-        "Synthea does not fully represent UK NHS demographics, so production thresholds would require UK-specific recalibration."
-    )}
-    {limitation_tile_html(
-        "🏘️",
-        "2. Reduced validity for socially complex patients",
-        "Medication-count tools can understate risk for patients affected by frailty, housing instability, language barriers, or other social complexity."
-    )}
-    {limitation_tile_html(
-        "💊",
-        "3. Drug interaction completeness",
-        "This version uses a simplified high-risk drug list rather than a full BNF interaction engine, so some interactions are not surfaced."
-    )}
-    {limitation_tile_html(
-        "⚠️",
-        "4. Not a clinical decision tool",
-        "RxSafe is designed to flag patients for human review only. No prescribing action should follow from the score alone."
-    )}
-    {limitation_tile_html(
-        "📊",
-        "5. OpenPrescribing data granularity",
-        "The live NHS feed is practice-level aggregate data. It adds population context, but it cannot support patient-level inference."
-    )}
+st.markdown("""
+<div class="rx-panel" style="background: #fffbeb; border: 1px solid #f59e0b; border-left: 4px solid #f59e0b; color: #78350f; margin-bottom: 16px;">
+    <strong>Caveats at the point of use</strong><br>
+    Review these limitations before interpreting scores. Clinical users must encounter caveats at the point of use.
 </div>
-"""
-st.markdown(limitations_html, unsafe_allow_html=True)
+""", unsafe_allow_html=True)
+
+limitations = [
+    {'icon': '🌍', 'title': '1. Demographic bias in source data', 'severity': 'HIGH', 'color': '#ef4444', 'body': 'Synthea does not fully represent UK NHS demographics, so production thresholds would require UK-specific recalibration.'},
+    {'icon': '🏘️', 'title': '2. Reduced validity for socially complex patients', 'severity': 'HIGH', 'color': '#f97316', 'body': 'Medication-count tools can understate risk for patients affected by frailty, housing instability, language barriers, or other social complexity.'},
+    {'icon': '💊', 'title': '3. Drug interaction completeness', 'severity': 'MEDIUM', 'color': '#f59e0b', 'body': 'This version uses a simplified high-risk drug list rather than a full BNF interaction engine, so some interactions are not surfaced.'},
+    {'icon': '⚠️', 'title': '4. Not a clinical decision tool', 'severity': 'CRITICAL', 'color': '#dc2626', 'body': 'RxSafe is designed to flag patients for human review only. No prescribing action should follow from the score alone.'},
+    {'icon': '📊', 'title': '5. OpenPrescribing data granularity', 'severity': 'LOW', 'color': '#22c55e', 'body': 'The live NHS feed is practice-level aggregate data. It adds population context, but it cannot support patient-level inference.'},
+]
+
+for limitation in limitations:
+    with st.expander(f"{limitation['icon']} {limitation['title']}"):
+        st.markdown(
+            f"<span style='display: inline-block; padding: 4px 10px; border-radius: 6px; "
+            f"background: {limitation['color']}18; color: {limitation['color']}; "
+            f"border: 1px solid {limitation['color']}; font-weight: 700; font-size: 0.8rem;'>"
+            f"{limitation['severity']}</span>",
+            unsafe_allow_html=True
+        )
+        st.markdown(limitation['body'])
 
 st.markdown(section_heading_html(
     "↻",
@@ -883,17 +942,17 @@ if not op_data.empty and "actual_cost" in op_data.columns:
         x="date",
         y="actual_cost",
         template="plotly_white",
-        color_discrete_sequence=["#7c8cff"],
+        color_discrete_sequence=["#818cf8"],
         labels={"actual_cost": "Monthly Cost (£)", "date": "Month"}
     )
     fig2.update_traces(
-        fillcolor="rgba(124, 140, 255, 0.10)",
-        line=dict(color="#7c8cff", width=2)
+        fillcolor="rgba(129,140,248,0.08)",
+        line=dict(color="#818cf8", width=2)
     )
     fig2.update_layout(
         height=280,
-        plot_bgcolor="#ffffff",
-        paper_bgcolor="rgba(255,255,255,0)",
+        plot_bgcolor="rgba(0,0,0,0)",
+        paper_bgcolor="rgba(0,0,0,0)",
         margin=dict(t=12, r=16, b=36, l=64),
         xaxis=dict(
             gridcolor="rgba(148,163,184,0.20)",

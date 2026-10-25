@@ -12,8 +12,29 @@ def load_synthea_patients(patients_path, medications_path):
     Demographic note: Default Synthea data reflects US Massachusetts
     census demographics, not UK NHS demographics. Flagged as limitation.
     """
-    patients = pd.read_csv(patients_path, low_memory=False)
-    medications = pd.read_csv(medications_path, low_memory=False)
+    patients = pd.read_csv(patients_path, low_memory=False, dtype={"Id": str})
+    medications = pd.read_csv(medications_path, low_memory=False, dtype={"PATIENT": str, "DESCRIPTION": str})
+
+    for label, frame, required in [
+        ("Patients", patients, {"Id", "BIRTHDATE"}),
+        ("Medications", medications, {"PATIENT", "DESCRIPTION"}),
+    ]:
+        missing = required - set(frame.columns)
+        if missing:
+            raise ValueError(f"{label} CSV missing columns: {', '.join(sorted(missing))}")
+    if patients.empty or patients['Id'].isna().any() or patients['Id'].duplicated().any():
+        raise ValueError("Patients must have unique, non-empty Id values and at least one row.")
+    if medications['PATIENT'].isna().any() or not medications['PATIENT'].isin(patients['Id']).all():
+        raise ValueError("Every medication PATIENT must match an Id in the patient CSV.")
+    if medications['DESCRIPTION'].isna().any():
+        raise ValueError("Medication DESCRIPTION values cannot be empty.")
+    birthdates = pd.to_datetime(patients['BIRTHDATE'], errors='coerce')
+    if birthdates.isna().any() or (birthdates > pd.Timestamp.now()).any():
+        raise ValueError("BIRTHDATE must contain valid, non-future dates (YYYY-MM-DD).")
+    for column in ('FIRST', 'LAST'):
+        if column not in patients:
+            patients[column] = 'Patient' if column == 'FIRST' else patients['Id']
+        patients[column] = patients[column].fillna('').astype(str)
 
     # Calculate age from BIRTHDATE
     patients['BIRTHDATE'] = pd.to_datetime(
